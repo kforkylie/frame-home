@@ -1,6 +1,6 @@
 // Frame Home helper service. Runs inside TizenBrew's service (Node 4, ES5 only).
 // The home screen page cannot use the TV's app API, so it asks this helper on
-// http://127.0.0.1:8085 to list apps, hand over their icons, open apps and
+// http://127.0.0.1:38085 to list apps, hand over their icons, open apps and
 // send remote-control keys (volume, HDMI). Only the TV itself may use it;
 // other devices on the network get /ping (alive or not) and nothing else.
 var http = require('http');
@@ -11,8 +11,8 @@ var fs = require('fs');
 var crypto = require('crypto');
 var urlmod = require('url');
 
-var VERSION = '0.2.1';
-var PORT = 8085;
+var VERSION = '0.2.2';
+var PORT = 38085;
 var NAME = 'Frame Home';
 var ALLOWED_KEYS = ['KEY_VOLUP', 'KEY_VOLDOWN', 'KEY_MUTE', 'KEY_SOURCE', 'KEY_HDMI', 'KEY_HDMI1', 'KEY_HDMI2', 'KEY_HDMI3', 'KEY_HDMI4'];
 

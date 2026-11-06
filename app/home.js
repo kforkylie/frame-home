@@ -1,14 +1,14 @@
-/* Frame Home 0.2.1 - TizenBrew app module.
+/* Frame Home 0.2.2 - TizenBrew app module.
    The page draws the home screen. Opening apps, their icons, volume and HDMI
    go through the module's helper service (service/service.js) on
-   http://127.0.0.1:8085, because TizenBrew pages cannot use the TV's app API.
+   http://127.0.0.1:38085, because TizenBrew pages cannot use the TV's app API.
    If the helper is not running, the page asks TizenBrew to start it and shows
    TizenBrew's own report on it. Nothing here changes TV settings. */
 (function () {
   "use strict";
 
-  var VERSION = "0.2.1";
-  var HELPER = "http://127.0.0.1:8085";
+  var VERSION = "0.2.2";
+  var HELPER = "http://127.0.0.1:38085";
 
   /* ---------- scale the 1280 x 720 stage to the screen ---------- */
   var stage = document.getElementById("stage");
