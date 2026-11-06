@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=1920, height=1080">
+<title>Frame Home</title>
+<link rel="stylesheet" href="home.css">
+</head>
+<body>
+<div id="stage">
+  <div class="art" id="artA"></div>
+  <div class="art" id="artB"></div>
+  <div class="wash"></div>
+
+  <header class="top">
+    <span class="here">HOME</span>
+    <span class="artlabel" id="artLabel">Artwork</span>
+  </header>
+
+  <section class="arch" aria-label="Clock">
+    <div class="arch-in">
+      <div class="orb" id="orb"></div>
+      <div class="time" id="time">--:--</div>
+      <div class="date" id="date"></div>
+      <div class="place" id="place">Singapore</div>
+    </div>
+  </section>
+
+  <div class="hello">
+    <div class="part" id="part">GOOD EVENING</div>
+    <div class="ask" id="ask">What's on tonight?</div>
+  </div>
+
+  <div class="rowwrap"><div class="row" id="row"></div></div>
+  <div class="dots" id="dots"></div>
+
+  <footer class="bar">
+    <span class="status" id="status">Ready</span>
+    <button type="button" class="chip" id="hdmi" data-row="1">HDMI 1</button>
+    <button type="button" class="chip" id="voldown" data-row="1">Volume &#8722;</button>
+    <button type="button" class="chip" id="volup" data-row="1">Volume +</button>
+    <button type="button" class="chip" id="check" data-row="1">Setup check</button>
+  </footer>
+
+  <div class="panel" id="panel" hidden>
+    <div class="panel-in">
+      <h2>Setup check</h2>
+      <p class="sub">What this TV lets Frame Home do. Press BACK or OK to close. Send a photo of this screen to Claude.</p>
+      <ol id="checks"></ol>
+    </div>
+  </div>
+</div>
+<script src="home.js"></script>
+</body>
+</html>
