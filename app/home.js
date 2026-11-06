@@ -1,14 +1,15 @@
-/* Frame Home 0.2.3 - TizenBrew app module.
-   The page draws the home screen. Opening apps, their icons, volume and HDMI
-   go through the module's helper service (service/service.js) on
+/* Frame Home 0.2.6 - TizenBrew app module.
+   The page draws the home screen. Opening apps, their logos and the input
+   picker go through the module's helper service (service/service.js) on
    http://127.0.0.1:38085, because TizenBrew pages cannot use the TV's app API.
-   The helper also watches an opened app and brings Frame Home back when it is
-   left. Nothing here changes TV settings. */
+   Volume is left to the remote: this TV refuses remote-control requests from
+   apps running on itself (tested 6 Nov). Nothing here changes TV settings. */
 (function () {
   "use strict";
 
-  var VERSION = "0.2.3";
+  var VERSION = "0.2.6";
   var HELPER = "http://127.0.0.1:38085";
+  var INPUT_PICKER = "org.tizen.SMSourceAPP"; // Samsung's own source picker on this TV
 
   /* ---------- scale the 1280 x 720 stage to the screen ---------- */
   var stage = document.getElementById("stage");
@@ -51,8 +52,7 @@
     arrow: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>'
   };
 
-  /* ---------- the apps, in row order. appId / rid are fallbacks checked on this TV model;
-     rid is the id the TV's network API knows the app by (used to see when it closes) ---------- */
+  /* ---------- the apps, in row order. appId is a fallback checked on this TV model ---------- */
   var APPS = [
     { key: "netflix", name: "Netflix", desc: "Films and series.", icon: ICON.film, match: /^netflix/i, appId: "3201907018807", rid: "3201907018807" },
     { key: "youtube", name: "YouTube", desc: "Ad-free through TizenTube.", icon: ICON.play, match: /^youtube$/i, appId: "111299001912", tizentube: true },
@@ -135,11 +135,11 @@
     apps: ["wait", "Apps: waiting for the helper..."],
     icons: ["wait", "Logos: waiting..."],
     tizentube: ["wait", "TizenTube: looking..."],
-    back: ["wait", "Coming back from apps: waiting for the helper..."],
-    remote: ["wait", "HDMI and volume: not tried yet (press Volume + once)"],
+    inputs: ["wait", "Inputs: not tried yet"],
     weather: ["wait", "Temperature: checking..."]
   };
-  var ORDER = ["helper", "tbreport", "apps", "icons", "tizentube", "back", "remote", "weather"];
+  var ORDER = ["helper", "tbreport", "apps", "icons", "tizentube", "inputs", "weather"];
+  var NOTES = ["To come back from an app: Home, then OK (keep TizenBrew first in the Home bar).", "Volume: use the remote. This TV refuses volume from apps running on it."];
   var recentEvents = [];
 
   /* ---------- live Singapore temperature (free government data, no key) ---------- */
@@ -227,7 +227,6 @@
       }
       helperUp = true;
       checks.helper = ["ok", "Helper " + j.version + " running. TV app access: " + (j.appApi ? "yes" : "no")];
-      checks.back = j.listener === "listening for app changes" ? ["ok", "Comes back after apps (" + j.listener + ")"] : ["no", "App watcher: " + j.listener + " (backup check every 2 s still on)"];
       renderChecks();
       say("Ready");
       loadApps();
@@ -239,8 +238,9 @@
     getJson("/apps", function (err, j) {
       if (err || !j) { checks.apps = ["no", "Could not read the app list: " + err]; renderChecks(); return; }
       if (j.error) { checks.apps = ["no", "App list: " + j.error + " (using built-in ids)"]; renderChecks(); }
-      if (!j.homeId) checks.back = ["no", "Cannot find Frame Home's own app id, so it cannot bring itself back"];
-      var list = j.apps || [], found = [], logoCount = 0;
+      var list = j.apps || [], found = [], logoCount = 0, picker = false;
+      for (var p = 0; p < list.length; p++) if (list[p].id === INPUT_PICKER) picker = true;
+      checks.inputs = picker ? ["ok", "Inputs opens Samsung's input picker"] : ["no", "Samsung's input picker was not found on this TV"];
       APPS.forEach(function (a) {
         for (var i = 0; i < list.length; i++) {
           if (a.match.test(list[i].name)) { a.appId = list[i].id; a.iconPath = list[i].icon; break; }
@@ -269,6 +269,18 @@
     }, 10000);
   }
 
+  function launchById(id, rid, name, done) {
+    if (!helperUp) { say("The helper is not running yet, so " + name + " cannot open. See Setup check", true); return; }
+    say("Opening " + name + "...");
+    var q = "/launch?id=" + encodeURIComponent(id) + "&rid=" + encodeURIComponent(rid || id) + "&name=" + encodeURIComponent(name);
+    getJson(q, function (err, j) {
+      var why = err || (j && j.error);
+      if (why) say("Could not open " + name + ": " + why, true);
+      else say("Opened " + name + ". To come back: Home, then OK");
+      if (done) done(why);
+    }, 10000);
+  }
+
   function openApp(a) {
     if (a.tizentube && tizentube && tbSocket && tbSocket.readyState === 1) {
       say("Opening YouTube (TizenTube)...");
@@ -277,32 +289,14 @@
       return;
     }
     if (!a.appId) { say(a.name + " is not installed on this TV", true); return; }
-    if (!helperUp) { say("The helper is not running yet, so apps cannot open. See Setup check", true); return; }
-    say("Opening " + a.name + "...");
-    var q = "/launch?id=" + encodeURIComponent(a.appId) + "&rid=" + encodeURIComponent(a.rid || a.appId) + "&name=" + encodeURIComponent(a.name);
-    getJson(q, function (err, j) {
-      if (err) say("Could not open " + a.name + ": " + err, true);
-      else if (j.error) say("Could not open " + a.name + ": " + j.error, true);
-      else say("Opened " + a.name + ". Leave it and Frame Home comes back");
-    }, 10000);
+    launchById(a.appId, a.rid, a.name);
   }
 
-  function sendKey(k, label) {
-    if (!helperUp) { say("The helper is not running yet, so " + label.toLowerCase() + " cannot work. See Setup check", true); return; }
-    say(label + "... if the TV asks to allow Frame Home, choose Allow");
-    checks.remote = ["wait", "Connecting to the TV's remote-control channel..."];
-    renderChecks();
-    getJson("/key?k=" + encodeURIComponent(k), function (err, j) {
-      if (err || j.error) {
-        var why = err || j.error;
-        checks.remote = ["no", "HDMI and volume blocked: " + why];
-        say(label + " did not work: " + why, true);
-      } else {
-        checks.remote = ["ok", "HDMI and volume work (port " + j.port + ")"];
-        say(label + " sent");
-      }
+  function openInputs() {
+    launchById(INPUT_PICKER, INPUT_PICKER, "the input picker", function (why) {
+      checks.inputs = why ? ["no", "Input picker would not open: " + why] : ["ok", "Input picker opened"];
       renderChecks();
-    }, 35000);
+    });
   }
 
   /* ---------- Setup check panel ---------- */
@@ -315,10 +309,15 @@
       li.innerHTML = '<span class="' + c[0] + '">' + (c[0] === "ok" ? "OK" : c[0] === "no" ? "NO" : "...") + "</span> " + c[1].replace(/</g, "&lt;");
       ol.appendChild(li);
     });
+    NOTES.forEach(function (t) {
+      var ln = document.createElement("li");
+      ln.textContent = t;
+      ol.appendChild(ln);
+    });
     if (recentEvents.length) {
       var le = document.createElement("li");
       le.className = "events";
-      le.textContent = "Recent: " + recentEvents.slice(-6).join("  |  ");
+      le.textContent = "Recent: " + recentEvents.slice(-5).join("  |  ");
       ol.appendChild(le);
     }
     var li2 = document.createElement("li");
@@ -350,9 +349,7 @@
   function act() {
     if (focusRow === 0) return openApp(APPS[appIdx]);
     var id = chips[chipIdx].id;
-    if (id === "hdmi") sendKey("KEY_HDMI1", "Switching to HDMI 1");
-    else if (id === "volup") sendKey("KEY_VOLUP", "Volume up");
-    else if (id === "voldown") sendKey("KEY_VOLDOWN", "Volume down");
+    if (id === "inputs") openInputs();
     else if (id === "check") { tbSend({ type: 7 }); refreshEvents(); renderChecks(); panel.hidden = false; say("Setup check open"); }
   }
 
