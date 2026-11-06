@@ -4,7 +4,8 @@
 // send remote-control keys (volume, HDMI). After it opens an app it watches
 // it, and when that app is left it brings Frame Home (TizenBrew) back to the
 // front. Only the TV itself may use the helper; other devices on the network
-// get /ping (alive or not) and nothing else.
+// get /ping (alive or not) and nothing else. A newer helper asks an older one
+// to step aside (/quit), so updates do not need a TV restart.
 var http = require('http');
 var net = require('net');
 var tls = require('tls');
@@ -13,10 +14,11 @@ var fs = require('fs');
 var crypto = require('crypto');
 var urlmod = require('url');
 
-var VERSION = '0.2.3';
+var VERSION = '0.2.4';
 var PORT = 38085;
 var NAME = 'Frame Home';
 var ALLOWED_KEYS = ['KEY_VOLUP', 'KEY_VOLDOWN', 'KEY_MUTE', 'KEY_SOURCE', 'KEY_HDMI', 'KEY_HDMI1', 'KEY_HDMI2', 'KEY_HDMI3', 'KEY_HDMI4'];
+var SOURCE_NAMES = /source|hdmi|input|tv viewer|live tv|tvplus|channel/i;
 
 function lanIp() {
   var n = os.networkInterfaces();
@@ -29,7 +31,7 @@ function lanIp() {
   return '127.0.0.1';
 }
 
-var state = { ip: lanIp(), remote: 'not tried yet', token: null, started: new Date().toISOString(), homeId: null, listener: 'not set up', returns: 0 };
+var state = { ip: lanIp(), remote: 'not tried yet', token: null, started: new Date().toISOString(), homeId: null, listener: 'not set up', returns: 0, sources: [] };
 var tokenFile = (os.tmpdir ? os.tmpdir() : '/tmp') + '/frame-home-token.txt';
 try { state.token = fs.readFileSync(tokenFile, 'utf8').trim() || null; } catch (e) {}
 
@@ -65,14 +67,19 @@ function listApps(cb) {
   if (!hasTizenApp()) return cb('The TV app list is not available to the helper', []);
   try {
     tizen.application.getAppsInfo(function (list) {
-      var out = [];
-      for (var i = 0; i < list.length; i++) out.push({ id: list[i].id, name: list[i].name, icon: list[i].iconPath || '' });
+      var out = [], src = [];
+      for (var i = 0; i < list.length; i++) {
+        out.push({ id: list[i].id, name: list[i].name, icon: list[i].iconPath || '' });
+        if (SOURCE_NAMES.test(list[i].name || '') || SOURCE_NAMES.test(list[i].id || '')) src.push(list[i].name + '=' + list[i].id);
+      }
       appCache = out;
+      state.sources = src.slice(0, 12);
       if (!state.homeId) state.homeId = findHome(out);
       cb(null, out);
     }, function (e) { cb((e && e.message) || String(e), []); });
   } catch (e) { cb(e.message, []); }
 }
+listApps(function () {});
 
 function restGet(id, cb) {
   var req = http.request({ host: state.ip, port: 8001, path: '/api/v2/applications/' + encodeURIComponent(id), method: 'GET' }, function (r) {
@@ -138,7 +145,6 @@ function onLeft(why) {
   var leftAt = Date.now(), from = watch.name, fromId = watch.id;
   setTimeout(function () {
     if (!watch) return;
-    // She went straight into another real app: leave her there.
     if (lastActive.at > leftAt && lastActive.id && lastActive.id !== fromId && lastActive.id !== state.homeId && isUserApp(lastActive.id)) {
       log('left ' + from + ' for ' + lastActive.id + ', staying there');
       watch = null;
@@ -148,10 +154,11 @@ function onLeft(why) {
   }, 1500);
 }
 
+var listenerFn = null;
 function setupListener() {
   if (!hasTizenApp() || typeof tizen.application.addAppStatusChangeListener !== 'function') { state.listener = 'not available on this TV'; return; }
   try {
-    tizen.application.addAppStatusChangeListener(function (appId, status) {
+    listenerFn = tizen.application.addAppStatusChangeListener(function (appId, status) {
       if (status === 'ACTIVE') lastActive = { id: appId, at: Date.now() };
       log(appId + ' ' + status);
       if (watch && appId === watch.id && status === 'INACTIVE') onLeft('it went to the background');
@@ -161,8 +168,7 @@ function setupListener() {
 }
 setupListener();
 
-// Backup check: also ask the TV every 2 seconds whether the opened app is still running.
-setInterval(function () {
+var pollTimer = setInterval(function () {
   if (!watch || watch.pending) return;
   if (Date.now() - watch.at > 6 * 3600 * 1000) { watch = null; return; }
   restGet(watch.rid, function (j) {
@@ -174,16 +180,28 @@ setInterval(function () {
 
 // ---- a very small WebSocket client for the TV's own remote-control channel ----
 var remote = null;
+var TARGETS = function () {
+  return [
+    { host: state.ip, port: 8002, secure: true },
+    { host: '127.0.0.1', port: 8002, secure: true },
+    { host: state.ip, port: 8001, secure: false },
+    { host: '127.0.0.1', port: 8001, secure: false }
+  ];
+};
 
-function wsConnect(port, cb) {
+function wsConnect(t, cb) {
   var key = crypto.randomBytes(16).toString('base64');
+  var label = t.host + ':' + t.port;
   var path = '/api/v2/channels/samsung.remote.control?name=' + new Buffer(NAME).toString('base64') + (state.token ? '&token=' + state.token : '');
-  var sock = port === 8002 ? tls.connect({ host: state.ip, port: port, rejectUnauthorized: false }) : net.connect({ host: state.ip, port: port });
-  var buf = new Buffer(0), upgraded = false, done = false;
-  function finish(err) { if (done) return; done = true; cb(err, err ? null : sock); }
-  sock.setTimeout(30000, function () { if (!done) { finish('no answer on port ' + port + ' (was an Allow box shown on the TV?)'); sock.destroy(); } });
-  sock.on(port === 8002 ? 'secureConnect' : 'connect', function () {
-    sock.write('GET ' + path + ' HTTP/1.1\r\nHost: ' + state.ip + ':' + port + '\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ' + key + '\r\nSec-WebSocket-Version: 13\r\n\r\n');
+  var sock;
+  try {
+    sock = t.secure ? tls.connect({ host: t.host, port: t.port, rejectUnauthorized: false }) : net.connect({ host: t.host, port: t.port });
+  } catch (e) { return cb(label + ' could not start: ' + e.message); }
+  var buf = new Buffer(0), upgraded = false, done = false, seen = '';
+  function finish(err) { if (done) return; done = true; cb(err ? label + ' ' + err + (seen ? ' [got: ' + seen.slice(0, 90) + ']' : '') : null, err ? null : sock); }
+  sock.setTimeout(30000, function () { if (!done) { finish('no answer (was an Allow box shown on the TV?)'); sock.destroy(); } });
+  sock.on(t.secure ? 'secureConnect' : 'connect', function () {
+    sock.write('GET ' + path + ' HTTP/1.1\r\nHost: ' + t.host + ':' + t.port + '\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ' + key + '\r\nSec-WebSocket-Version: 13\r\n\r\n');
   });
   sock.on('data', function (chunk) {
     buf = Buffer.concat([buf, chunk]);
@@ -191,7 +209,8 @@ function wsConnect(port, cb) {
       var i = buf.toString('binary').indexOf('\r\n\r\n');
       if (i < 0) return;
       var first = buf.slice(0, i).toString().split('\r\n')[0];
-      if (first.indexOf(' 101') < 0) { finish('port ' + port + ' said: ' + first); sock.destroy(); return; }
+      seen += first + ' ';
+      if (first.indexOf(' 101') < 0) { finish('said: ' + first); sock.destroy(); return; }
       upgraded = true;
       buf = buf.slice(i + 4);
     }
@@ -203,6 +222,7 @@ function wsConnect(port, cb) {
       var op = buf[0] & 15, text = buf.slice(off, off + len).toString();
       buf = buf.slice(off + len);
       if (op === 1) {
+        seen += text + ' ';
         var m = {};
         try { m = JSON.parse(text); } catch (e) {}
         if (m.event === 'ms.channel.connect') {
@@ -212,14 +232,17 @@ function wsConnect(port, cb) {
           }
           finish(null);
         } else if (m.event === 'ms.channel.unauthorized') {
-          finish('the TV refused on port ' + port + ' (choose Allow when it asks)');
+          finish('refused (unauthorized)');
+          sock.destroy();
+        } else if (m.event === 'ms.channel.timeOut') {
+          finish('the Allow box timed out');
           sock.destroy();
         }
-      } else if (op === 8) { sock.destroy(); }
+      } else if (op === 8) { seen += '[close frame] '; sock.destroy(); }
     }
   });
-  sock.on('error', function (e) { finish(e.message + ' on port ' + port); });
-  sock.on('close', function () { if (remote && remote.sock === sock) remote = null; finish('closed on port ' + port); });
+  sock.on('error', function (e) { finish('error: ' + e.message); });
+  sock.on('close', function () { if (remote && remote.sock === sock) remote = null; finish('closed'); });
 }
 
 function wsSendText(sock, text) {
@@ -235,16 +258,27 @@ function wsSendText(sock, text) {
 function sendKey(k, cb) {
   if (ALLOWED_KEYS.indexOf(k) < 0) return cb('That key is not allowed');
   var msg = JSON.stringify({ method: 'ms.remote.control', params: { Cmd: 'Click', DataOfCmd: k, Option: 'false', TypeOfRemote: 'SendRemoteKey' } });
-  if (remote) { wsSendText(remote.sock, msg); return cb(null, remote.port); }
-  wsConnect(8001, function (err, sock) {
-    if (!err) { remote = { sock: sock, port: 8001 }; state.remote = 'connected on port 8001'; wsSendText(sock, msg); return cb(null, 8001); }
-    var first = err;
-    wsConnect(8002, function (err2, sock2) {
-      if (!err2) { remote = { sock: sock2, port: 8002 }; state.remote = 'connected on port 8002'; wsSendText(sock2, msg); return cb(null, 8002); }
-      state.remote = first + '; ' + err2;
-      cb(state.remote);
+  if (remote) { wsSendText(remote.sock, msg); return cb(null, remote.label); }
+  var targets = TARGETS(), errors = [];
+  (function next(i) {
+    if (i >= targets.length) {
+      state.remote = errors.join(' | ');
+      log('remote channel failed: ' + state.remote);
+      return cb(state.remote + (state.sources.length ? ' || input apps: ' + state.sources.join(', ') : ''));
+    }
+    wsConnect(targets[i], function (err, sock) {
+      if (!err) {
+        var label = targets[i].host + ':' + targets[i].port;
+        remote = { sock: sock, label: label };
+        state.remote = 'connected on ' + label;
+        log('remote channel ' + state.remote);
+        wsSendText(sock, msg);
+        return cb(null, label);
+      }
+      errors.push(err);
+      next(i + 1);
     });
-  });
+  })(0);
 }
 
 function sendIcon(res, p) {
@@ -256,23 +290,44 @@ function sendIcon(res, p) {
   });
 }
 
+// ---- step aside for a newer helper ----
+function shutdown() {
+  log('stepping aside for a newer helper');
+  try { clearInterval(pollTimer); } catch (e) {}
+  try { if (listenerFn !== null) tizen.application.removeAppStatusChangeListener(listenerFn); } catch (e) {}
+  try { if (remote) remote.sock.destroy(); } catch (e) {}
+  try { server.close(); } catch (e) {}
+}
+
 var server = http.createServer(function (req, res) {
   var u = urlmod.parse(req.url, true), q = u.query;
   var addr = (req.socket && req.socket.remoteAddress) || '';
   var local = addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1' || addr === state.ip || addr === '::ffff:' + state.ip;
   if (!local && u.pathname !== '/ping') return sendJson(res, 403, { error: 'only the TV itself may use this' });
   if (u.pathname === '/ping') return sendJson(res, 200, { ok: true, version: VERSION, appApi: !!hasTizenApp(), remote: state.remote, listener: state.listener, homeKnown: !!state.homeId, returns: state.returns, started: state.started });
-  if (u.pathname === '/apps') return listApps(function (err, list) { sendJson(res, 200, { error: err, apps: list, homeId: state.homeId }); });
+  if (u.pathname === '/apps') return listApps(function (err, list) { sendJson(res, 200, { error: err, apps: list, homeId: state.homeId, sources: state.sources }); });
   if (u.pathname === '/launch') {
     return launch(q.id, function (err, how) {
       if (!err) { watch = { id: q.id, rid: q.rid || q.id, name: q.name || q.id, at: Date.now(), wasRunning: false, pending: false }; log('opened ' + watch.name + ' via ' + how); }
       sendJson(res, 200, { error: err || null, how: how });
     });
   }
-  if (u.pathname === '/key') return sendKey(q.k, function (err, port) { sendJson(res, 200, { error: err || null, port: port || null }); });
-  if (u.pathname === '/events') return sendJson(res, 200, { events: events, watching: watch ? watch.name : null, listener: state.listener, homeId: state.homeId });
+  if (u.pathname === '/key') return sendKey(q.k, function (err, label) { sendJson(res, 200, { error: err || null, port: label || null }); });
+  if (u.pathname === '/events') return sendJson(res, 200, { events: events, watching: watch ? watch.name : null, listener: state.listener, homeId: state.homeId, sources: state.sources });
   if (u.pathname === '/icon') return sendIcon(res, q.p);
+  if (u.pathname === '/quit') { sendJson(res, 200, { ok: true, version: VERSION }); setTimeout(shutdown, 100); return; }
   sendJson(res, 404, { error: 'not found' });
 });
-server.on('error', function () {});
+
+var listenTries = 0;
+server.on('error', function (e) {
+  if (e && e.code === 'EADDRINUSE' && listenTries < 6) {
+    listenTries++;
+    // an older helper holds the port: ask it to step aside, then try again
+    var r = http.request({ host: '127.0.0.1', port: PORT, path: '/quit', method: 'GET' }, function (res) { res.resume(); });
+    r.on('error', function () {});
+    r.end();
+    setTimeout(function () { try { server.listen(PORT, '0.0.0.0'); } catch (x) {} }, 800);
+  }
+});
 server.listen(PORT, '0.0.0.0');
