@@ -14,11 +14,12 @@ var fs = require('fs');
 var crypto = require('crypto');
 var urlmod = require('url');
 
-var VERSION = '0.2.4';
+var VERSION = '0.2.5';
 var PORT = 38085;
 var NAME = 'Frame Home';
 var ALLOWED_KEYS = ['KEY_VOLUP', 'KEY_VOLDOWN', 'KEY_MUTE', 'KEY_SOURCE', 'KEY_HDMI', 'KEY_HDMI1', 'KEY_HDMI2', 'KEY_HDMI3', 'KEY_HDMI4'];
 var SOURCE_NAMES = /source|hdmi|input|tv viewer|live tv|tvplus|channel/i;
+var SOURCE_APP = 'org.tizen.SMSourceAPP'; // Samsung's own input picker, found on this TV 6 Nov
 
 function lanIp() {
   var n = os.networkInterfaces();
@@ -183,9 +184,7 @@ var remote = null;
 var TARGETS = function () {
   return [
     { host: state.ip, port: 8002, secure: true },
-    { host: '127.0.0.1', port: 8002, secure: true },
-    { host: state.ip, port: 8001, secure: false },
-    { host: '127.0.0.1', port: 8001, secure: false }
+    { host: state.ip, port: 8001, secure: false }
   ];
 };
 
@@ -261,10 +260,18 @@ function sendKey(k, cb) {
   if (remote) { wsSendText(remote.sock, msg); return cb(null, remote.label); }
   var targets = TARGETS(), errors = [];
   (function next(i) {
-    if (i >= targets.length) {
+    if (i >= targets.length || (errors.length && /timed out/.test(errors[errors.length - 1]))) {
       state.remote = errors.join(' | ');
       log('remote channel failed: ' + state.remote);
-      return cb(state.remote + (state.sources.length ? ' || input apps: ' + state.sources.join(', ') : ''));
+      // HDMI has a second way in: open Samsung's own source picker
+      if (/^KEY_HDMI/.test(k) || k === 'KEY_SOURCE') {
+        return launch(SOURCE_APP, function (err2) {
+          if (err2) return cb('remote channel: ' + state.remote + ' || source picker: ' + err2);
+          log('opened the source picker instead');
+          cb(null, 'source picker');
+        });
+      }
+      return cb(state.remote);
     }
     wsConnect(targets[i], function (err, sock) {
       if (!err) {
