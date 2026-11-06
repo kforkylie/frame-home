@@ -1,7 +1,8 @@
 // Frame Home helper service. Runs inside TizenBrew's service (Node 4, ES5 only).
 // The home screen page cannot use the TV's app API, so it asks this helper on
 // http://127.0.0.1:8085 to list apps, hand over their icons, open apps and
-// send remote-control keys (volume, HDMI). Listens on the TV itself only.
+// send remote-control keys (volume, HDMI). Only the TV itself may use it;
+// other devices on the network get /ping (alive or not) and nothing else.
 var http = require('http');
 var net = require('net');
 var tls = require('tls');
@@ -10,7 +11,7 @@ var fs = require('fs');
 var crypto = require('crypto');
 var urlmod = require('url');
 
-var VERSION = '0.2.0';
+var VERSION = '0.2.1';
 var PORT = 8085;
 var NAME = 'Frame Home';
 var ALLOWED_KEYS = ['KEY_VOLUP', 'KEY_VOLDOWN', 'KEY_MUTE', 'KEY_SOURCE', 'KEY_HDMI', 'KEY_HDMI1', 'KEY_HDMI2', 'KEY_HDMI3', 'KEY_HDMI4'];
@@ -158,6 +159,10 @@ function sendIcon(res, p) {
 
 var server = http.createServer(function (req, res) {
   var u = urlmod.parse(req.url, true), q = u.query;
+  var addr = (req.socket && req.socket.remoteAddress) || '';
+  var local = addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1' || addr === state.ip || addr === '::ffff:' + state.ip;
+  // Only /ping answers other devices on the home network (so the laptop can see the helper is alive).
+  if (!local && u.pathname !== '/ping') return sendJson(res, 403, { error: 'only the TV itself may use this' });
   if (u.pathname === '/ping') return sendJson(res, 200, { ok: true, version: VERSION, appApi: !!hasTizenApp(), remote: state.remote, started: state.started });
   if (u.pathname === '/apps') return listApps(function (err, list) { sendJson(res, 200, { error: err, apps: list }); });
   if (u.pathname === '/launch') return launch(q.id, function (err, how) { sendJson(res, 200, { error: err || null, how: how }); });
@@ -166,4 +171,4 @@ var server = http.createServer(function (req, res) {
   sendJson(res, 404, { error: 'not found' });
 });
 server.on('error', function () {});
-server.listen(PORT, '127.0.0.1');
+server.listen(PORT, '0.0.0.0');

@@ -1,12 +1,13 @@
-/* Frame Home 0.2.0 - TizenBrew app module.
+/* Frame Home 0.2.1 - TizenBrew app module.
    The page draws the home screen. Opening apps, their icons, volume and HDMI
    go through the module's helper service (service/service.js) on
    http://127.0.0.1:8085, because TizenBrew pages cannot use the TV's app API.
-   Nothing here changes TV settings. */
+   If the helper is not running, the page asks TizenBrew to start it and shows
+   TizenBrew's own report on it. Nothing here changes TV settings. */
 (function () {
   "use strict";
 
-  var VERSION = "0.2.0";
+  var VERSION = "0.2.1";
   var HELPER = "http://127.0.0.1:8085";
 
   /* ---------- scale the 1280 x 720 stage to the screen ---------- */
@@ -129,13 +130,14 @@
   /* ---------- Setup check data ---------- */
   var checks = {
     helper: ["wait", "Helper: starting..."],
+    tbreport: ["wait", "TizenBrew's report on the helper: asking..."],
     apps: ["wait", "Apps: waiting for the helper..."],
     icons: ["wait", "Icons: waiting..."],
     tizentube: ["wait", "TizenTube: looking..."],
     remote: ["wait", "HDMI and volume: not tried yet (press Volume + once)"],
     weather: ["wait", "Temperature: checking..."]
   };
-  var ORDER = ["helper", "apps", "icons", "tizentube", "remote", "weather"];
+  var ORDER = ["helper", "tbreport", "apps", "icons", "tizentube", "remote", "weather"];
 
   /* ---------- live Singapore temperature (free government data, no key) ---------- */
   function weather() {
@@ -157,21 +159,73 @@
   weather();
   setInterval(weather, 30 * 60 * 1000);
 
+  /* ---------- TizenBrew: find TizenTube and this module, start the helper if needed ---------- */
+  var tbSocket = null, tizentube = null, selfModule = null, startAsked = 0;
+  function tbSend(o) { if (tbSocket && tbSocket.readyState === 1) tbSocket.send(JSON.stringify(o)); }
+  function connectTizenBrew() {
+    try {
+      tbSocket = new WebSocket("ws://127.0.0.1:8081");
+      tbSocket.onopen = function () { tbSend({ type: 4 }); tbSend({ type: 7 }); };
+      tbSocket.onmessage = function (ev) {
+        var d = {};
+        try { d = JSON.parse(ev.data); } catch (e) { return; }
+        if (d.type === 4 && d.payload) {
+          for (var i = 0; i < d.payload.length; i++) {
+            var m = d.payload[i], n = m.fullName || "";
+            if (/tizentube/i.test(n)) tizentube = m;
+            if (/frame-home/i.test(n)) selfModule = m;
+          }
+          checks.tizentube = tizentube ? ["ok", "TizenTube found: " + tizentube.fullName] : ["no", "TizenTube not in TizenBrew, YouTube opens the normal app"];
+          if (!selfModule) checks.tbreport = ["no", "TizenBrew does not list Frame Home"];
+          else if (!selfModule.serviceFile) checks.tbreport = ["no", "TizenBrew still has the old Frame Home without the helper (restart the TV)"];
+          renderChecks();
+          if (!helperUp && pingTries >= 2) startHelper();
+        } else if (d.type === 4 && d.payload === null) {
+          setTimeout(function () { tbSend({ type: 4 }); }, 600);
+        } else if (d.type === 7 && d.payload) {
+          var mine = null;
+          for (var j = 0; j < d.payload.length; j++) if (/frame-home/i.test(d.payload[j].name || "")) mine = d.payload[j];
+          if (!mine) checks.tbreport = ["no", "TizenBrew has not started the helper (" + d.payload.length + " services running)"];
+          else if (mine.hasCrashed) checks.tbreport = ["no", "Helper crashed: " + JSON.stringify(mine.error || "no detail").slice(0, 200)];
+          else checks.tbreport = ["ok", "TizenBrew says the helper is running"];
+          renderChecks();
+        } else if (d.type === 8) {
+          checks.tbreport = ["no", "TizenBrew error: " + String(d.payload).slice(0, 200)];
+          renderChecks();
+        }
+      };
+      tbSocket.onerror = function () { checks.tizentube = ["no", "Could not talk to TizenBrew"]; renderChecks(); };
+    } catch (e) { checks.tizentube = ["no", "Could not talk to TizenBrew: " + e.message]; }
+  }
+  connectTizenBrew();
+
+  function startHelper() {
+    if (!selfModule || !selfModule.serviceFile || startAsked >= 2) return;
+    startAsked++;
+    checks.tbreport = ["wait", "Asking TizenBrew to start the helper (attempt " + startAsked + ")..."];
+    renderChecks();
+    tbSend({ type: 6, payload: selfModule });
+    setTimeout(function () { tbSend({ type: 7 }); }, 4000);
+  }
+
   /* ---------- talk to the helper: wait for it to start, then read the app list ---------- */
   var helperUp = false, pingTries = 0;
   function ping() {
     pingTries++;
     getJson("/ping", function (err, j) {
       if (err) {
-        checks.helper = ["no", "Helper not running yet (" + err + ", try " + pingTries + ")"];
+        checks.helper = ["no", "Helper not answering yet (" + err + ", try " + pingTries + " of 40)"];
         renderChecks();
-        if (pingTries < 20) setTimeout(ping, 1500);
-        else say("The helper did not start. Close TizenBrew fully and open Frame Home again", true);
+        if (pingTries === 2 || pingTries === 12) startHelper();
+        if (pingTries % 5 === 0) tbSend({ type: 7 });
+        if (pingTries < 40) setTimeout(ping, 1500);
+        else say("The helper did not start. Open Setup check and send Claude a photo", true);
         return;
       }
       helperUp = true;
       checks.helper = ["ok", "Helper " + j.version + " running. TV app access: " + (j.appApi ? "yes" : "no")];
       renderChecks();
+      say("Ready");
       loadApps();
     }, 3000);
   }
@@ -204,38 +258,15 @@
     }, 10000);
   }
 
-  /* ---------- TizenTube lives inside TizenBrew: ask TizenBrew for it ---------- */
-  var tbSocket = null, tizentube = null;
-  function connectTizenBrew() {
-    try {
-      tbSocket = new WebSocket("ws://127.0.0.1:8081");
-      tbSocket.onopen = function () { tbSocket.send(JSON.stringify({ type: 4 })); };
-      tbSocket.onmessage = function (ev) {
-        var d = JSON.parse(ev.data);
-        if (d.type === 4 && d.payload) {
-          for (var i = 0; i < d.payload.length; i++) {
-            if (/tizentube/i.test(d.payload[i].fullName || "")) { tizentube = d.payload[i]; break; }
-          }
-          checks.tizentube = tizentube ? ["ok", "TizenTube found: " + tizentube.fullName] : ["no", "TizenTube not in TizenBrew, YouTube opens the normal app"];
-          renderChecks();
-        } else if (d.type === 4 && d.payload === null) {
-          setTimeout(function () { tbSocket.send(JSON.stringify({ type: 4 })); }, 600);
-        }
-      };
-      tbSocket.onerror = function () { checks.tizentube = ["no", "Could not talk to TizenBrew"]; renderChecks(); };
-    } catch (e) { checks.tizentube = ["no", "Could not talk to TizenBrew: " + e.message]; }
-  }
-  connectTizenBrew();
-
   function openApp(a) {
     if (a.tizentube && tizentube && tbSocket && tbSocket.readyState === 1) {
       say("Opening YouTube (TizenTube)...");
-      tbSocket.send(JSON.stringify({ type: 5, payload: tizentube }));
+      tbSend({ type: 5, payload: tizentube });
       if (!tizentube.evaluateScriptOnDocumentStart) setTimeout(function () { location.href = tizentube.appPath; }, 250);
       return;
     }
     if (!a.appId) { say(a.name + " is not installed on this TV", true); return; }
-    if (!helperUp) { say("Still starting up, try again in a moment", true); return; }
+    if (!helperUp) { say("The helper is not running yet, so apps cannot open. See Setup check", true); return; }
     say("Opening " + a.name + "...");
     getJson("/launch?id=" + encodeURIComponent(a.appId), function (err, j) {
       if (err) say("Could not open " + a.name + ": " + err, true);
@@ -245,7 +276,7 @@
   }
 
   function sendKey(k, label) {
-    if (!helperUp) { say("Still starting up, try again in a moment", true); return; }
+    if (!helperUp) { say("The helper is not running yet, so " + label.toLowerCase() + " cannot work. See Setup check", true); return; }
     say(label + "... if the TV asks to allow Frame Home, choose Allow");
     checks.remote = ["wait", "Connecting to the TV's remote-control channel..."];
     renderChecks();
@@ -300,7 +331,7 @@
     if (id === "hdmi") sendKey("KEY_HDMI1", "Switching to HDMI 1");
     else if (id === "volup") sendKey("KEY_VOLUP", "Volume up");
     else if (id === "voldown") sendKey("KEY_VOLDOWN", "Volume down");
-    else if (id === "check") { renderChecks(); panel.hidden = false; say("Setup check open"); }
+    else if (id === "check") { tbSend({ type: 7 }); renderChecks(); panel.hidden = false; say("Setup check open"); }
   }
 
   document.addEventListener("keydown", function (e) {
@@ -320,5 +351,5 @@
     paint();
   });
 
-  say("Ready");
+  say("Starting up...");
 })();
