@@ -1,10 +1,11 @@
 {
   "name": "frame-home",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A calm home screen for a Samsung Frame TV: a clock arch, a scrolling row of apps and soft landscapes that change with the time of day. A TizenBrew app module.",
   "packageType": "app",
   "appName": "Frame Home",
   "appPath": "app/index.html",
+  "serviceFile": "service/service.js",
   "keys": [],
   "license": "MIT"
 }

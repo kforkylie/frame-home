@@ -1,9 +1,13 @@
-/* Frame Home 0.1.0 - TizenBrew app module.
-   Test build: the approved design plus an on-screen Setup check that reports
-   what this TV actually allows (launching apps, HDMI, volume). Nothing here
-   changes TV settings; it only opens apps and sends remote-control keys. */
+/* Frame Home 0.2.0 - TizenBrew app module.
+   The page draws the home screen. Opening apps, their icons, volume and HDMI
+   go through the module's helper service (service/service.js) on
+   http://127.0.0.1:8085, because TizenBrew pages cannot use the TV's app API.
+   Nothing here changes TV settings. */
 (function () {
   "use strict";
+
+  var VERSION = "0.2.0";
+  var HELPER = "http://127.0.0.1:8085";
 
   /* ---------- scale the 1280 x 720 stage to the screen ---------- */
   var stage = document.getElementById("stage");
@@ -14,16 +18,29 @@
   window.addEventListener("resize", fit);
   fit();
 
-  var hasTizen = typeof window.tizen !== "undefined";
+  function pad(n) { return (n < 10 ? "0" : "") + n; }
   var statusEl = document.getElementById("status");
   function say(text, isErr) {
     var d = new Date();
     statusEl.textContent = text + "  ·  " + pad(d.getHours()) + ":" + pad(d.getMinutes());
     statusEl.className = "status" + (isErr ? " err" : "");
   }
-  function pad(n) { return (n < 10 ? "0" : "") + n; }
 
-  /* ---------- icons ---------- */
+  function getJson(path, cb, timeout) {
+    var x = new XMLHttpRequest();
+    x.open("GET", HELPER + path);
+    x.timeout = timeout || 8000;
+    x.onload = function () {
+      var j = null;
+      try { j = JSON.parse(x.responseText); } catch (e) {}
+      cb(j ? null : "Bad reply from the helper", j);
+    };
+    x.onerror = function () { cb("The helper is not running", null); };
+    x.ontimeout = function () { cb("The helper did not answer in time", null); };
+    x.send();
+  }
+
+  /* ---------- icons used until the real app icons arrive ---------- */
   var ICON = {
     film: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 5v14M17 5v14M3 9h4M3 15h4M17 9h4M17 15h4"/></svg>',
     play: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M10 8.5l5 3.5-5 3.5z"/></svg>',
@@ -33,18 +50,18 @@
     arrow: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>'
   };
 
-  /* ---------- the apps, in row order ---------- */
+  /* ---------- the apps, in row order. ids are fallbacks checked on this TV model ---------- */
   var APPS = [
-    { key: "netflix", name: "Netflix", desc: "Films and series.", icon: ICON.film, match: /netflix/i },
-    { key: "youtube", name: "YouTube", desc: "Ad-free through TizenTube.", icon: ICON.play, match: /^youtube$/i, tizentube: true },
-    { key: "spotify", name: "Spotify", desc: "Music on the soundbar.", icon: ICON.note, match: /spotify/i },
-    { key: "viu", name: "Viu", desc: "Dramas.", icon: ICON.heart, match: /^viu\b/i },
-    { key: "mewatch", name: "mewatch", desc: "Local TV.", icon: ICON.tv, match: /mewatch/i }
+    { key: "netflix", name: "Netflix", desc: "Films and series.", icon: ICON.film, match: /^netflix/i, appId: "3201907018807" },
+    { key: "youtube", name: "YouTube", desc: "Ad-free through TizenTube.", icon: ICON.play, match: /^youtube$/i, appId: "111299001912", tizentube: true },
+    { key: "spotify", name: "Spotify", desc: "Music on the soundbar.", icon: ICON.note, match: /^spotify/i, appId: "3201606009684" },
+    { key: "viu", name: "Viu", desc: "Dramas.", icon: ICON.heart, match: /^viu\b/i, appId: null },
+    { key: "mewatch", name: "mewatch", desc: "Local TV.", icon: ICON.tv, match: /mewatch/i, appId: null }
   ];
 
   var row = document.getElementById("row");
   var dots = document.getElementById("dots");
-  APPS.forEach(function (a, i) {
+  APPS.forEach(function (a) {
     var c = document.createElement("div");
     c.className = "card";
     c.innerHTML = '<div class="ico">' + a.icon + '</div><div class="nm">' + a.name + '</div><div class="ds">' + a.desc + '</div><div class="go">' + ICON.arrow + "</div>";
@@ -99,18 +116,26 @@
     var part = h < 12 ? "morning" : h < 18 ? "afternoon" : "evening";
     document.getElementById("part").textContent = "GOOD " + part.toUpperCase();
     document.getElementById("ask").textContent = h < 12 ? "What's on this morning?" : h < 18 ? "What's on this afternoon?" : "What's on tonight?";
-    // orb travels across the top of the arch: sun 6am-6pm, moon 6pm-6am
-    var mins = h * 60 + m;
-    var day = mins >= 360 && mins < 1080;
+    var mins = h * 60 + m, day = mins >= 360 && mins < 1080;
     var f = day ? (mins - 360) / 720 : ((mins - 1080 + 1440) % 1440) / 720;
     var x = 8 + f * 136, y = 128 - Math.sin(f * Math.PI) * 104;
-    orb.style.left = x + "px";
-    orb.style.top = y + "px";
+    orb.style.transform = "translate(" + x.toFixed(1) + "px," + y.toFixed(1) + "px)";
     orb.classList.toggle("moon", !day);
     showScene(sceneFor(h));
   }
   tick();
   setInterval(tick, 15000);
+
+  /* ---------- Setup check data ---------- */
+  var checks = {
+    helper: ["wait", "Helper: starting..."],
+    apps: ["wait", "Apps: waiting for the helper..."],
+    icons: ["wait", "Icons: waiting..."],
+    tizentube: ["wait", "TizenTube: looking..."],
+    remote: ["wait", "HDMI and volume: not tried yet (press Volume + once)"],
+    weather: ["wait", "Temperature: checking..."]
+  };
+  var ORDER = ["helper", "apps", "icons", "tizentube", "remote", "weather"];
 
   /* ---------- live Singapore temperature (free government data, no key) ---------- */
   function weather() {
@@ -119,61 +144,64 @@
     x.timeout = 8000;
     x.onload = function () {
       try {
-        var j = JSON.parse(x.responseText), r = j.items[0].readings, s = 0;
+        var r = JSON.parse(x.responseText).items[0].readings, s = 0;
         r.forEach(function (v) { s += v.value; });
         document.getElementById("place").textContent = "Singapore · " + Math.round(s / r.length) + "°";
         checks.weather = ["ok", "Live temperature works (" + r.length + " stations)"];
       } catch (e) { checks.weather = ["no", "Temperature reply could not be read"]; }
       renderChecks();
     };
-    x.onerror = x.ontimeout = function () { checks.weather = ["no", "Temperature service not reachable from the TV"]; renderChecks(); };
+    x.onerror = x.ontimeout = function () { checks.weather = ["no", "Temperature service not reachable"]; renderChecks(); };
     x.send();
   }
   weather();
   setInterval(weather, 30 * 60 * 1000);
 
-  /* ---------- find the installed apps ---------- */
-  var checks = {
-    tizen: hasTizen ? ["ok", "Running on the TV (tizen API present)"] : ["no", "Not on a TV (tizen API missing)"],
-    apps: ["wait", "Looking for installed apps..."],
-    tizentube: ["wait", "Looking for TizenTube in TizenBrew..."],
-    remote: ["wait", "Remote-control channel not tried yet (press a volume or HDMI button)"],
-    volume: ["wait", "Volume level: checking..."],
-    weather: ["wait", "Temperature: checking..."]
-  };
-  var installed = [];
-  if (hasTizen) {
-    try {
-      tizen.application.getAppsInfo(function (list) {
-        installed = list;
-        var found = [];
-        APPS.forEach(function (a) {
-          for (var i = 0; i < list.length; i++) {
-            if (a.match.test(list[i].name)) { a.appId = list[i].id; a.iconPath = list[i].iconPath; break; }
-          }
-          if (a.appId) {
-            found.push(a.name + " = " + a.appId);
-            if (a.iconPath) {
-              var img = new Image();
-              img.onload = function () { a.el.querySelector(".ico").innerHTML = ""; a.el.querySelector(".ico").appendChild(img); };
-              img.src = a.iconPath;
-            }
-          } else if (!a.tizentube) {
-            a.el.classList.add("missing");
-            a.el.querySelector(".ds").textContent = "Not found on this TV.";
-          }
-        });
-        checks.apps = ["ok", found.length + " of " + APPS.length + " apps found: " + found.join("; ")];
+  /* ---------- talk to the helper: wait for it to start, then read the app list ---------- */
+  var helperUp = false, pingTries = 0;
+  function ping() {
+    pingTries++;
+    getJson("/ping", function (err, j) {
+      if (err) {
+        checks.helper = ["no", "Helper not running yet (" + err + ", try " + pingTries + ")"];
         renderChecks();
-      }, function (e) { checks.apps = ["no", "Could not list apps: " + e.message]; renderChecks(); });
-    } catch (e) { checks.apps = ["no", "Could not list apps: " + e.message]; }
-    try {
-      var av = tizen.tvaudiocontrol.getVolume();
-      checks.volume = ["ok", "Can read the volume: " + av];
-    } catch (e) { checks.volume = ["no", "Cannot read the volume directly (" + (e.name || e.message) + ")"]; }
-  } else {
-    checks.apps = ["no", "Cannot list apps outside the TV"];
-    checks.volume = ["no", "Cannot read the volume outside the TV"];
+        if (pingTries < 20) setTimeout(ping, 1500);
+        else say("The helper did not start. Close TizenBrew fully and open Frame Home again", true);
+        return;
+      }
+      helperUp = true;
+      checks.helper = ["ok", "Helper " + j.version + " running. TV app access: " + (j.appApi ? "yes" : "no")];
+      renderChecks();
+      loadApps();
+    }, 3000);
+  }
+  ping();
+
+  function loadApps() {
+    getJson("/apps", function (err, j) {
+      if (err || !j) { checks.apps = ["no", "Could not read the app list: " + err]; renderChecks(); return; }
+      if (j.error) { checks.apps = ["no", "App list: " + j.error + " (using built-in ids)"]; renderChecks(); }
+      var list = j.apps || [], found = [], iconCount = 0;
+      APPS.forEach(function (a) {
+        for (var i = 0; i < list.length; i++) {
+          if (a.match.test(list[i].name)) { a.appId = list[i].id; a.iconPath = list[i].icon; break; }
+        }
+        if (a.appId) found.push(a.name + " " + a.appId);
+        else {
+          a.el.classList.add("missing");
+          a.el.querySelector(".ds").textContent = "Not found on this TV.";
+        }
+        if (a.iconPath) {
+          iconCount++;
+          var img = new Image();
+          img.onload = function () { var ico = a.el.querySelector(".ico"); ico.innerHTML = ""; ico.appendChild(img); };
+          img.src = HELPER + "/icon?p=" + encodeURIComponent(a.iconPath);
+        }
+      });
+      if (!j.error) checks.apps = ["ok", found.length + " of " + APPS.length + " found (" + list.length + " apps on the TV): " + found.join("; ")];
+      checks.icons = iconCount ? ["ok", iconCount + " real app icons loading"] : ["no", "No app icons available, using drawn ones"];
+      renderChecks();
+    }, 10000);
   }
 
   /* ---------- TizenTube lives inside TizenBrew: ask TizenBrew for it ---------- */
@@ -186,9 +214,9 @@
         var d = JSON.parse(ev.data);
         if (d.type === 4 && d.payload) {
           for (var i = 0; i < d.payload.length; i++) {
-            if (/tizentube/i.test(d.payload[i].fullName || "") || /tizentube/i.test(d.payload[i].appName || "")) { tizentube = d.payload[i]; break; }
+            if (/tizentube/i.test(d.payload[i].fullName || "")) { tizentube = d.payload[i]; break; }
           }
-          checks.tizentube = tizentube ? ["ok", "TizenTube found: " + tizentube.fullName] : ["no", "TizenTube not in TizenBrew's module list"];
+          checks.tizentube = tizentube ? ["ok", "TizenTube found: " + tizentube.fullName] : ["no", "TizenTube not in TizenBrew, YouTube opens the normal app"];
           renderChecks();
         } else if (d.type === 4 && d.payload === null) {
           setTimeout(function () { tbSocket.send(JSON.stringify({ type: 4 })); }, 600);
@@ -200,64 +228,38 @@
   connectTizenBrew();
 
   function openApp(a) {
-    say("Opening " + a.name + "...");
     if (a.tizentube && tizentube && tbSocket && tbSocket.readyState === 1) {
-      try {
-        (tizentube.keys || []).forEach(function (k) { try { tizen.tvinputdevice.registerKey(k); } catch (e) {} });
-        tbSocket.send(JSON.stringify({ type: 5, payload: tizentube }));
-        setTimeout(function () { location.href = tizentube.appPath; }, 300);
-        return;
-      } catch (e) { say("Could not open TizenTube: " + e.message, true); }
+      say("Opening YouTube (TizenTube)...");
+      tbSocket.send(JSON.stringify({ type: 5, payload: tizentube }));
+      if (!tizentube.evaluateScriptOnDocumentStart) setTimeout(function () { location.href = tizentube.appPath; }, 250);
+      return;
     }
-    if (!a.appId) {
-      if (a.tizentube) {
-        for (var i = 0; i < installed.length; i++) if (/^youtube$/i.test(installed[i].name)) { a.appId = installed[i].id; break; }
-      }
-      if (!a.appId) { say(a.name + " is not installed on this TV", true); return; }
-    }
-    tizen.application.launch(a.appId, function () { say("Opened " + a.name); }, function (e) { say("Could not open " + a.name + ": " + e.message, true); });
+    if (!a.appId) { say(a.name + " is not installed on this TV", true); return; }
+    if (!helperUp) { say("Still starting up, try again in a moment", true); return; }
+    say("Opening " + a.name + "...");
+    getJson("/launch?id=" + encodeURIComponent(a.appId), function (err, j) {
+      if (err) say("Could not open " + a.name + ": " + err, true);
+      else if (j.error) say("Could not open " + a.name + ": " + j.error, true);
+      else say("Opened " + a.name);
+    }, 10000);
   }
 
-  /* ---------- HDMI and volume through the TV's own remote-control channel ---------- */
-  var remote = null, remoteQueue = [], remoteTried = "";
-  function remoteUrl(port) {
-    var name = btoa("Frame Home");
-    return (port === 8002 ? "wss" : "ws") + "://127.0.0.1:" + port + "/api/v2/channels/samsung.remote.control?name=" + name;
-  }
-  function openRemote(port) {
-    remoteTried += (remoteTried ? ", " : "") + port;
-    var ws;
-    try { ws = new WebSocket(remoteUrl(port)); } catch (e) { return fail(); }
-    var settled = false;
-    ws.onmessage = function (ev) {
-      var d = {};
-      try { d = JSON.parse(ev.data); } catch (e) {}
-      if (d.event === "ms.channel.connect" && !settled) {
-        settled = true; remote = ws;
-        checks.remote = ["ok", "Remote-control channel connected on port " + port];
-        renderChecks();
-        while (remoteQueue.length) sendKeyNow(remoteQueue.shift());
-      } else if (d.event === "ms.channel.unauthorized" && !settled) {
-        settled = true;
-        checks.remote = ["no", "TV refused the remote-control channel on port " + port + " (choose Allow if the TV asks)"];
-        renderChecks(); say("TV said no to remote control. If a prompt appeared, choose Allow and try again", true);
-      }
-    };
-    ws.onerror = ws.onclose = function () { if (!settled) { settled = true; fail(); } else if (remote === ws) { remote = null; } };
-    function fail() {
-      if (port === 8001) return openRemote(8002);
-      checks.remote = ["no", "Remote-control channel not available (tried " + remoteTried + ")"];
-      renderChecks(); say("This TV did not allow HDMI or volume from Frame Home", true);
-    }
-  }
-  function sendKeyNow(k) {
-    remote.send(JSON.stringify({ method: "ms.remote.control", params: { Cmd: "Click", DataOfCmd: k, Option: "false", TypeOfRemote: "SendRemoteKey" } }));
-  }
   function sendKey(k, label) {
-    say(label);
-    if (remote && remote.readyState === 1) return sendKeyNow(k);
-    remoteQueue.push(k);
-    if (remoteQueue.length === 1) { remoteTried = ""; checks.remote = ["wait", "Connecting to the remote-control channel..."]; renderChecks(); openRemote(8001); }
+    if (!helperUp) { say("Still starting up, try again in a moment", true); return; }
+    say(label + "... if the TV asks to allow Frame Home, choose Allow");
+    checks.remote = ["wait", "Connecting to the TV's remote-control channel..."];
+    renderChecks();
+    getJson("/key?k=" + encodeURIComponent(k), function (err, j) {
+      if (err || j.error) {
+        var why = err || j.error;
+        checks.remote = ["no", "HDMI and volume blocked: " + why];
+        say(label + " did not work: " + why, true);
+      } else {
+        checks.remote = ["ok", "HDMI and volume work (port " + j.port + ")"];
+        say(label + " sent");
+      }
+      renderChecks();
+    }, 35000);
   }
 
   /* ---------- Setup check panel ---------- */
@@ -265,14 +267,13 @@
   function renderChecks() {
     var ol = document.getElementById("checks");
     ol.innerHTML = "";
-    ["tizen", "apps", "tizentube", "remote", "volume", "weather"].forEach(function (k) {
-      var li = document.createElement("li");
-      var c = checks[k];
+    ORDER.forEach(function (k) {
+      var li = document.createElement("li"), c = checks[k];
       li.innerHTML = '<span class="' + c[0] + '">' + (c[0] === "ok" ? "OK" : c[0] === "no" ? "NO" : "...") + "</span> " + c[1].replace(/</g, "&lt;");
       ol.appendChild(li);
     });
     var li2 = document.createElement("li");
-    li2.textContent = "Version 0.1.0. Screen " + window.innerWidth + " x " + window.innerHeight + ". " + installed.length + " apps installed in total.";
+    li2.textContent = "Version " + VERSION + ". Screen " + window.innerWidth + " x " + window.innerHeight + ".";
     ol.appendChild(li2);
   }
   renderChecks();
@@ -280,14 +281,15 @@
   /* ---------- remote navigation ---------- */
   var chips = Array.prototype.slice.call(document.querySelectorAll(".chip"));
   var focusRow = 0, appIdx = 0, chipIdx = 0;
+  var STEP = 264; // card 236 + gap 28
   function paint() {
     APPS.forEach(function (a, i) {
       a.el.classList.toggle("focus", focusRow === 0 && i === appIdx);
       a.dot.classList.toggle("on", i === appIdx);
     });
     dotsLabel.textContent = (appIdx + 1) + " of " + APPS.length + (appIdx < APPS.length - 1 ? "  ·  " + APPS[APPS.length - 1].name + " is further right" : "");
-    var shift = Math.max(0, Math.min(appIdx, APPS.length - 3)) * 240;
-    row.style.transform = "translateX(" + (-shift) + "px)";
+    var shift = Math.max(0, Math.min(appIdx - 1, APPS.length - 3)) * STEP;
+    row.style.transform = "translate3d(" + (-shift) + "px,0,0)";
     chips.forEach(function (c, i) { c.classList.toggle("focus", focusRow === 1 && i === chipIdx); });
   }
   paint();
@@ -295,7 +297,7 @@
   function act() {
     if (focusRow === 0) return openApp(APPS[appIdx]);
     var id = chips[chipIdx].id;
-    if (id === "hdmi") sendKey("KEY_HDMI1", "Switching to HDMI 1...");
+    if (id === "hdmi") sendKey("KEY_HDMI1", "Switching to HDMI 1");
     else if (id === "volup") sendKey("KEY_VOLUP", "Volume up");
     else if (id === "voldown") sendKey("KEY_VOLDOWN", "Volume down");
     else if (id === "check") { renderChecks(); panel.hidden = false; say("Setup check open"); }
