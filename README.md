@@ -11,7 +11,7 @@ A calm home screen for a Samsung The Frame TV, built as a [TizenBrew](https://gi
 
 ## Install
 
-In TizenBrew, open the module manager, add a GitHub module and type the newest pinned version, for example `kforkylie/frame-home@0.2.2`. Pinned versions load straight away; the unpinned name can be served stale by the CDN for hours.
+In TizenBrew, open the module manager, add a GitHub module and type the newest pinned version, for example `kforkylie/frame-home@0.2.3`. Pinned versions load straight away; the unpinned name can be served stale by the CDN for hours.
 
 ## Remote
 

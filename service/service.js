@@ -1,8 +1,10 @@
 // Frame Home helper service. Runs inside TizenBrew's service (Node 4, ES5 only).
 // The home screen page cannot use the TV's app API, so it asks this helper on
 // http://127.0.0.1:38085 to list apps, hand over their icons, open apps and
-// send remote-control keys (volume, HDMI). Only the TV itself may use it;
-// other devices on the network get /ping (alive or not) and nothing else.
+// send remote-control keys (volume, HDMI). After it opens an app it watches
+// it, and when that app is left it brings Frame Home (TizenBrew) back to the
+// front. Only the TV itself may use the helper; other devices on the network
+// get /ping (alive or not) and nothing else.
 var http = require('http');
 var net = require('net');
 var tls = require('tls');
@@ -11,7 +13,7 @@ var fs = require('fs');
 var crypto = require('crypto');
 var urlmod = require('url');
 
-var VERSION = '0.2.2';
+var VERSION = '0.2.3';
 var PORT = 38085;
 var NAME = 'Frame Home';
 var ALLOWED_KEYS = ['KEY_VOLUP', 'KEY_VOLDOWN', 'KEY_MUTE', 'KEY_SOURCE', 'KEY_HDMI', 'KEY_HDMI1', 'KEY_HDMI2', 'KEY_HDMI3', 'KEY_HDMI4'];
@@ -27,9 +29,17 @@ function lanIp() {
   return '127.0.0.1';
 }
 
-var state = { ip: lanIp(), remote: 'not tried yet', token: null, started: new Date().toISOString() };
+var state = { ip: lanIp(), remote: 'not tried yet', token: null, started: new Date().toISOString(), homeId: null, listener: 'not set up', returns: 0 };
 var tokenFile = (os.tmpdir ? os.tmpdir() : '/tmp') + '/frame-home-token.txt';
 try { state.token = fs.readFileSync(tokenFile, 'utf8').trim() || null; } catch (e) {}
+
+var events = [];
+function log(text) {
+  var d = new Date();
+  function p(n) { return (n < 10 ? '0' : '') + n; }
+  events.push(p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds()) + ' ' + text);
+  if (events.length > 30) events.shift();
+}
 
 function sendJson(res, code, obj) {
   res.writeHead(code, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' });
@@ -38,15 +48,41 @@ function sendJson(res, code, obj) {
 
 function hasTizenApp() { return typeof tizen !== 'undefined' && tizen && tizen.application; }
 
+// ---- which app Frame Home itself runs in (the TizenBrew app) ----
+function findHome(list) {
+  var pkg = null;
+  try { pkg = tizen.application.getCurrentApplication().appInfo.packageId; } catch (e) {}
+  for (var i = 0; i < list.length; i++) {
+    var id = list[i].id || '';
+    if (pkg && id.indexOf(pkg + '.') === 0 && !/service/i.test(id)) return id;
+  }
+  for (var j = 0; j < list.length; j++) if (/tizenbrew/i.test(list[j].name || '') && !/service/i.test(list[j].id || '')) return list[j].id;
+  return null;
+}
+
+var appCache = null;
 function listApps(cb) {
   if (!hasTizenApp()) return cb('The TV app list is not available to the helper', []);
   try {
     tizen.application.getAppsInfo(function (list) {
       var out = [];
       for (var i = 0; i < list.length; i++) out.push({ id: list[i].id, name: list[i].name, icon: list[i].iconPath || '' });
+      appCache = out;
+      if (!state.homeId) state.homeId = findHome(out);
       cb(null, out);
     }, function (e) { cb((e && e.message) || String(e), []); });
   } catch (e) { cb(e.message, []); }
+}
+
+function restGet(id, cb) {
+  var req = http.request({ host: state.ip, port: 8001, path: '/api/v2/applications/' + encodeURIComponent(id), method: 'GET' }, function (r) {
+    var d = '';
+    r.on('data', function (c) { d += c; });
+    r.on('end', function () { var j = null; try { j = JSON.parse(d); } catch (e) {} cb(j); });
+  });
+  req.on('error', function () { cb(null); });
+  req.setTimeout(4000, function () { req.abort(); });
+  req.end();
 }
 
 function restLaunch(id, cb) {
@@ -72,6 +108,69 @@ function launch(id, cb) {
   }
   restLaunch(id, function (err) { cb(err, 'rest'); });
 }
+
+// ---- bring Frame Home back when the opened app is left ----
+var watch = null; // { id, rid, name, at, wasRunning, pending }
+var lastActive = { id: null, at: 0 };
+
+function bringHomeBack(why) {
+  watch = null;
+  if (!state.homeId) { log('cannot return: Frame Home app id unknown'); return; }
+  state.returns++;
+  log('returning to Frame Home (' + why + ')');
+  try {
+    tizen.application.launch(state.homeId, function () {}, function (e) {
+      log('return via app API failed: ' + (e && e.message) + ', trying the network API');
+      restLaunch(state.homeId, function () {});
+    });
+  } catch (e) { restLaunch(state.homeId, function () {}); }
+}
+
+function isUserApp(id) {
+  if (!appCache) return true;
+  for (var i = 0; i < appCache.length; i++) if (appCache[i].id === id) return !!appCache[i].icon;
+  return false;
+}
+
+function onLeft(why) {
+  if (!watch || watch.pending) return;
+  watch.pending = true;
+  var leftAt = Date.now(), from = watch.name, fromId = watch.id;
+  setTimeout(function () {
+    if (!watch) return;
+    // She went straight into another real app: leave her there.
+    if (lastActive.at > leftAt && lastActive.id && lastActive.id !== fromId && lastActive.id !== state.homeId && isUserApp(lastActive.id)) {
+      log('left ' + from + ' for ' + lastActive.id + ', staying there');
+      watch = null;
+      return;
+    }
+    bringHomeBack('left ' + from + ': ' + why);
+  }, 1500);
+}
+
+function setupListener() {
+  if (!hasTizenApp() || typeof tizen.application.addAppStatusChangeListener !== 'function') { state.listener = 'not available on this TV'; return; }
+  try {
+    tizen.application.addAppStatusChangeListener(function (appId, status) {
+      if (status === 'ACTIVE') lastActive = { id: appId, at: Date.now() };
+      log(appId + ' ' + status);
+      if (watch && appId === watch.id && status === 'INACTIVE') onLeft('it went to the background');
+    });
+    state.listener = 'listening for app changes';
+  } catch (e) { state.listener = 'could not listen: ' + e.message; }
+}
+setupListener();
+
+// Backup check: also ask the TV every 2 seconds whether the opened app is still running.
+setInterval(function () {
+  if (!watch || watch.pending) return;
+  if (Date.now() - watch.at > 6 * 3600 * 1000) { watch = null; return; }
+  restGet(watch.rid, function (j) {
+    if (!watch || !j || typeof j.running === 'undefined') return;
+    if (j.running) watch.wasRunning = true;
+    else if (watch.wasRunning) onLeft('it closed');
+  });
+}, 2000);
 
 // ---- a very small WebSocket client for the TV's own remote-control channel ----
 var remote = null;
@@ -161,12 +260,17 @@ var server = http.createServer(function (req, res) {
   var u = urlmod.parse(req.url, true), q = u.query;
   var addr = (req.socket && req.socket.remoteAddress) || '';
   var local = addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1' || addr === state.ip || addr === '::ffff:' + state.ip;
-  // Only /ping answers other devices on the home network (so the laptop can see the helper is alive).
   if (!local && u.pathname !== '/ping') return sendJson(res, 403, { error: 'only the TV itself may use this' });
-  if (u.pathname === '/ping') return sendJson(res, 200, { ok: true, version: VERSION, appApi: !!hasTizenApp(), remote: state.remote, started: state.started });
-  if (u.pathname === '/apps') return listApps(function (err, list) { sendJson(res, 200, { error: err, apps: list }); });
-  if (u.pathname === '/launch') return launch(q.id, function (err, how) { sendJson(res, 200, { error: err || null, how: how }); });
+  if (u.pathname === '/ping') return sendJson(res, 200, { ok: true, version: VERSION, appApi: !!hasTizenApp(), remote: state.remote, listener: state.listener, homeKnown: !!state.homeId, returns: state.returns, started: state.started });
+  if (u.pathname === '/apps') return listApps(function (err, list) { sendJson(res, 200, { error: err, apps: list, homeId: state.homeId }); });
+  if (u.pathname === '/launch') {
+    return launch(q.id, function (err, how) {
+      if (!err) { watch = { id: q.id, rid: q.rid || q.id, name: q.name || q.id, at: Date.now(), wasRunning: false, pending: false }; log('opened ' + watch.name + ' via ' + how); }
+      sendJson(res, 200, { error: err || null, how: how });
+    });
+  }
   if (u.pathname === '/key') return sendKey(q.k, function (err, port) { sendJson(res, 200, { error: err || null, port: port || null }); });
+  if (u.pathname === '/events') return sendJson(res, 200, { events: events, watching: watch ? watch.name : null, listener: state.listener, homeId: state.homeId });
   if (u.pathname === '/icon') return sendIcon(res, q.p);
   sendJson(res, 404, { error: 'not found' });
 });

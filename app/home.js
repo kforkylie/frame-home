@@ -1,13 +1,13 @@
-/* Frame Home 0.2.2 - TizenBrew app module.
+/* Frame Home 0.2.3 - TizenBrew app module.
    The page draws the home screen. Opening apps, their icons, volume and HDMI
    go through the module's helper service (service/service.js) on
    http://127.0.0.1:38085, because TizenBrew pages cannot use the TV's app API.
-   If the helper is not running, the page asks TizenBrew to start it and shows
-   TizenBrew's own report on it. Nothing here changes TV settings. */
+   The helper also watches an opened app and brings Frame Home back when it is
+   left. Nothing here changes TV settings. */
 (function () {
   "use strict";
 
-  var VERSION = "0.2.2";
+  var VERSION = "0.2.3";
   var HELPER = "http://127.0.0.1:38085";
 
   /* ---------- scale the 1280 x 720 stage to the screen ---------- */
@@ -41,7 +41,7 @@
     x.send();
   }
 
-  /* ---------- icons used until the real app icons arrive ---------- */
+  /* ---------- icons used until the real app logos arrive ---------- */
   var ICON = {
     film: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 5v14M17 5v14M3 9h4M3 15h4M17 9h4M17 15h4"/></svg>',
     play: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M10 8.5l5 3.5-5 3.5z"/></svg>',
@@ -51,9 +51,10 @@
     arrow: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>'
   };
 
-  /* ---------- the apps, in row order. ids are fallbacks checked on this TV model ---------- */
+  /* ---------- the apps, in row order. appId / rid are fallbacks checked on this TV model;
+     rid is the id the TV's network API knows the app by (used to see when it closes) ---------- */
   var APPS = [
-    { key: "netflix", name: "Netflix", desc: "Films and series.", icon: ICON.film, match: /^netflix/i, appId: "3201907018807" },
+    { key: "netflix", name: "Netflix", desc: "Films and series.", icon: ICON.film, match: /^netflix/i, appId: "3201907018807", rid: "3201907018807" },
     { key: "youtube", name: "YouTube", desc: "Ad-free through TizenTube.", icon: ICON.play, match: /^youtube$/i, appId: "111299001912", tizentube: true },
     { key: "spotify", name: "Spotify", desc: "Music on the soundbar.", icon: ICON.note, match: /^spotify/i, appId: "3201606009684" },
     { key: "viu", name: "Viu", desc: "Dramas.", icon: ICON.heart, match: /^viu\b/i, appId: null },
@@ -132,12 +133,14 @@
     helper: ["wait", "Helper: starting..."],
     tbreport: ["wait", "TizenBrew's report on the helper: asking..."],
     apps: ["wait", "Apps: waiting for the helper..."],
-    icons: ["wait", "Icons: waiting..."],
+    icons: ["wait", "Logos: waiting..."],
     tizentube: ["wait", "TizenTube: looking..."],
+    back: ["wait", "Coming back from apps: waiting for the helper..."],
     remote: ["wait", "HDMI and volume: not tried yet (press Volume + once)"],
     weather: ["wait", "Temperature: checking..."]
   };
-  var ORDER = ["helper", "tbreport", "apps", "icons", "tizentube", "remote", "weather"];
+  var ORDER = ["helper", "tbreport", "apps", "icons", "tizentube", "back", "remote", "weather"];
+  var recentEvents = [];
 
   /* ---------- live Singapore temperature (free government data, no key) ---------- */
   function weather() {
@@ -177,7 +180,7 @@
           }
           checks.tizentube = tizentube ? ["ok", "TizenTube found: " + tizentube.fullName] : ["no", "TizenTube not in TizenBrew, YouTube opens the normal app"];
           if (!selfModule) checks.tbreport = ["no", "TizenBrew does not list Frame Home"];
-          else if (!selfModule.serviceFile) checks.tbreport = ["no", "TizenBrew still has the old Frame Home without the helper (restart the TV)"];
+          else if (!selfModule.serviceFile) checks.tbreport = ["no", "TizenBrew has a Frame Home without the helper (install the newest pinned version)"];
           renderChecks();
           if (!helperUp && pingTries >= 2) startHelper();
         } else if (d.type === 4 && d.payload === null) {
@@ -224,6 +227,7 @@
       }
       helperUp = true;
       checks.helper = ["ok", "Helper " + j.version + " running. TV app access: " + (j.appApi ? "yes" : "no")];
+      checks.back = j.listener === "listening for app changes" ? ["ok", "Comes back after apps (" + j.listener + ")"] : ["no", "App watcher: " + j.listener + " (backup check every 2 s still on)"];
       renderChecks();
       say("Ready");
       loadApps();
@@ -235,7 +239,8 @@
     getJson("/apps", function (err, j) {
       if (err || !j) { checks.apps = ["no", "Could not read the app list: " + err]; renderChecks(); return; }
       if (j.error) { checks.apps = ["no", "App list: " + j.error + " (using built-in ids)"]; renderChecks(); }
-      var list = j.apps || [], found = [], iconCount = 0;
+      if (!j.homeId) checks.back = ["no", "Cannot find Frame Home's own app id, so it cannot bring itself back"];
+      var list = j.apps || [], found = [], logoCount = 0;
       APPS.forEach(function (a) {
         for (var i = 0; i < list.length; i++) {
           if (a.match.test(list[i].name)) { a.appId = list[i].id; a.iconPath = list[i].icon; break; }
@@ -246,14 +251,20 @@
           a.el.querySelector(".ds").textContent = "Not found on this TV.";
         }
         if (a.iconPath) {
-          iconCount++;
+          logoCount++;
           var img = new Image();
-          img.onload = function () { var ico = a.el.querySelector(".ico"); ico.innerHTML = ""; ico.appendChild(img); };
+          img.alt = a.name;
+          img.onload = function () {
+            var ico = a.el.querySelector(".ico");
+            ico.innerHTML = "";
+            ico.appendChild(img);
+            a.el.classList.add("logo");
+          };
           img.src = HELPER + "/icon?p=" + encodeURIComponent(a.iconPath);
         }
       });
       if (!j.error) checks.apps = ["ok", found.length + " of " + APPS.length + " found (" + list.length + " apps on the TV): " + found.join("; ")];
-      checks.icons = iconCount ? ["ok", iconCount + " real app icons loading"] : ["no", "No app icons available, using drawn ones"];
+      checks.icons = logoCount ? ["ok", logoCount + " app logos shown full card"] : ["no", "No app logos available, using drawn icons"];
       renderChecks();
     }, 10000);
   }
@@ -268,10 +279,11 @@
     if (!a.appId) { say(a.name + " is not installed on this TV", true); return; }
     if (!helperUp) { say("The helper is not running yet, so apps cannot open. See Setup check", true); return; }
     say("Opening " + a.name + "...");
-    getJson("/launch?id=" + encodeURIComponent(a.appId), function (err, j) {
+    var q = "/launch?id=" + encodeURIComponent(a.appId) + "&rid=" + encodeURIComponent(a.rid || a.appId) + "&name=" + encodeURIComponent(a.name);
+    getJson(q, function (err, j) {
       if (err) say("Could not open " + a.name + ": " + err, true);
       else if (j.error) say("Could not open " + a.name + ": " + j.error, true);
-      else say("Opened " + a.name);
+      else say("Opened " + a.name + ". Leave it and Frame Home comes back");
     }, 10000);
   }
 
@@ -303,11 +315,21 @@
       li.innerHTML = '<span class="' + c[0] + '">' + (c[0] === "ok" ? "OK" : c[0] === "no" ? "NO" : "...") + "</span> " + c[1].replace(/</g, "&lt;");
       ol.appendChild(li);
     });
+    if (recentEvents.length) {
+      var le = document.createElement("li");
+      le.className = "events";
+      le.textContent = "Recent: " + recentEvents.slice(-6).join("  |  ");
+      ol.appendChild(le);
+    }
     var li2 = document.createElement("li");
     li2.textContent = "Version " + VERSION + ". Screen " + window.innerWidth + " x " + window.innerHeight + ".";
     ol.appendChild(li2);
   }
   renderChecks();
+  function refreshEvents() {
+    if (!helperUp) return;
+    getJson("/events", function (err, j) { if (!err && j && j.events) { recentEvents = j.events; renderChecks(); } }, 4000);
+  }
 
   /* ---------- remote navigation ---------- */
   var chips = Array.prototype.slice.call(document.querySelectorAll(".chip"));
@@ -318,7 +340,7 @@
       a.el.classList.toggle("focus", focusRow === 0 && i === appIdx);
       a.dot.classList.toggle("on", i === appIdx);
     });
-    dotsLabel.textContent = (appIdx + 1) + " of " + APPS.length + (appIdx < APPS.length - 1 ? "  ·  " + APPS[APPS.length - 1].name + " is further right" : "");
+    dotsLabel.textContent = APPS[appIdx].name + "  ·  " + (appIdx + 1) + " of " + APPS.length;
     var shift = Math.max(0, Math.min(appIdx - 1, APPS.length - 3)) * STEP;
     row.style.transform = "translate3d(" + (-shift) + "px,0,0)";
     chips.forEach(function (c, i) { c.classList.toggle("focus", focusRow === 1 && i === chipIdx); });
@@ -331,7 +353,7 @@
     if (id === "hdmi") sendKey("KEY_HDMI1", "Switching to HDMI 1");
     else if (id === "volup") sendKey("KEY_VOLUP", "Volume up");
     else if (id === "voldown") sendKey("KEY_VOLDOWN", "Volume down");
-    else if (id === "check") { tbSend({ type: 7 }); renderChecks(); panel.hidden = false; say("Setup check open"); }
+    else if (id === "check") { tbSend({ type: 7 }); refreshEvents(); renderChecks(); panel.hidden = false; say("Setup check open"); }
   }
 
   document.addEventListener("keydown", function (e) {
